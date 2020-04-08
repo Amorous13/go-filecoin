@@ -1,19 +1,21 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"net/http"
 
 	"github.com/filecoin-project/chain-validation/chain/types"
 	"github.com/filecoin-project/chain-validation/state"
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/specs-actors/actors/abi"
-	"github.com/filecoin-project/specs-actors/actors/builtin/power"
+	"github.com/filecoin-project/specs-actors/actors/abi/big"
+	"github.com/filecoin-project/specs-actors/actors/runtime"
 	rpc "github.com/gorilla/rpc/v2"
 	jsonrpc "github.com/gorilla/rpc/v2/json"
 	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log"
 	cbg "github.com/whyrusleeping/cbor-gen"
+
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/vmcontext"
 )
 
 var log = logging.Logger("go-filecoin")
@@ -58,6 +60,7 @@ type ApplyMessageReply struct {
 	Receipt types.MessageReceipt
 	Penalty abi.TokenAmount
 	Reward  abi.TokenAmount
+	Root    cid.Cid
 }
 
 type ApplyTipSetMessagesArgs struct {
@@ -69,6 +72,11 @@ type ApplyTipSetMessagesArgs struct {
 
 type ApplyTipSetMessagesReply struct {
 	Receipts []types.MessageReceipt
+	Root     cid.Cid
+}
+
+func NewApplierService(applier state.Applier) *ApplierService {
+	return &ApplierService{applier: applier}
 }
 
 type ApplierService struct {
@@ -76,6 +84,15 @@ type ApplierService struct {
 }
 
 func (a *ApplierService) ApplyMessage(r *http.Request, args *ApplyMessageArgs, reply *ApplyMessageReply) error {
+	result, err := a.applier.ApplyMessage(args.Epoch, args.Message)
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply.Receipt = result.Receipt
+	reply.Reward = result.Reward
+	reply.Penalty = result.Penalty
+	// FIXME need to access the state root here
+	reply.Root = cid.Undef
 	log.Infow("ApplierService.ApplyMessage", "args", args, "reply", reply)
 	return nil
 }
@@ -90,14 +107,151 @@ func (a *ApplierService) ApplyTipSetMessages(r *http.Request, args *ApplyTipSetM
 	return nil
 }
 
+func NewVmWrapperService(vm state.VMWrapper) *VmWrapperService {
+	return &VmWrapperService{vm: vm}
+}
+
+type VmWrapperService struct {
+	vm state.VMWrapper
+}
+
+type RootReply struct {
+	Root cid.Cid
+}
+
+func (v *VmWrapperService) Root(r *http.Request, args *struct{}, reply *RootReply) error {
+	reply.Root = v.vm.Root()
+	log.Infow("Root", "reply", reply)
+	return nil
+}
+
+type StoreGetArgs struct {
+	Key cid.Cid
+}
+
+type StoreGetReply struct {
+	Out []byte
+}
+
+func (v *VmWrapperService) StoreGet(r *http.Request, args *StoreGetArgs, reply *StoreGetReply) error {
+	var out cbg.Deferred
+	if err := v.vm.StoreGet(args.Key, &out); err != nil {
+		log.Fatal(err)
+	}
+	reply.Out = out.Raw
+	log.Infow("StoreGet", "args", args, "reply", reply)
+	return nil
+}
+
+type StorePutArgs struct {
+	Value []byte
+}
+
+type StorePutReply struct {
+	Key cid.Cid
+}
+
+func (v *VmWrapperService) StorePut(r *http.Request, args *StorePutArgs, reply *StorePutReply) error {
+	key, err := v.vm.StorePut(runtime.CBORBytes(args.Value))
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply.Key = key
+	log.Infow("StorePut", "args", args, "reply", reply)
+	return nil
+}
+
+type ActorArgs struct {
+	Addr address.Address
+}
+
+type ActorReply struct {
+	Code       cid.Cid
+	Head       cid.Cid
+	Balance    big.Int
+	CallSeqNum uint64
+}
+
+func (v *VmWrapperService) Actor(r *http.Request, args *ActorArgs, reply *ActorReply) error {
+	actor, err := v.vm.Actor(args.Addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply.Code = actor.Code()
+	reply.Head = actor.Head()
+	reply.Balance = actor.Balance()
+	reply.CallSeqNum = actor.CallSeqNum()
+	log.Infow("Actor", "args", args, "reply", reply)
+	return nil
+}
+
+type SetActorStateArgs struct {
+	Addr    address.Address
+	Balance abi.TokenAmount
+	State   []byte // TODO see if you can make this CBORBytes instead
+}
+
+func (v *VmWrapperService) SetActorState(r *http.Request, args *SetActorStateArgs, reply *ActorReply) error {
+	actor, err := v.vm.SetActorState(args.Addr, args.Balance, runtime.CBORBytes(args.State))
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply.Code = actor.Code()
+	reply.Head = actor.Head()
+	reply.Balance = actor.Balance()
+	reply.CallSeqNum = actor.CallSeqNum()
+	log.Infow("SetActorState", "args", args, "reply", reply)
+	return nil
+}
+
+type CreateActorArgs struct {
+	Code    cid.Cid
+	Addr    address.Address
+	Balance abi.TokenAmount
+	State   []byte
+}
+
+type CreateActorReply struct {
+	Addr       address.Address
+	Code       cid.Cid
+	Head       cid.Cid
+	Balance    big.Int
+	CallSeqNum uint64
+}
+
+func (v *VmWrapperService) CreateActor(r *http.Request, args *CreateActorArgs, reply *CreateActorReply) error {
+	actor, addr, err := v.vm.CreateActor(args.Code, args.Addr, args.Balance, runtime.CBORBytes(args.State))
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply.Addr = addr
+	reply.Code = actor.Code()
+	reply.Head = actor.Head()
+	reply.Balance = actor.Balance()
+	reply.CallSeqNum = actor.CallSeqNum()
+	log.Infow("CreateActor", "args", args, "reply", reply)
+	return nil
+}
+
 func main() {
 	s := rpc.NewServer()
 	s.RegisterCodec(jsonrpc.NewCodec(), "application/json")
 	if err := s.RegisterService(new(ConfigService), ""); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	if err := s.RegisterService(new(ApplierService), ""); err != nil {
-		panic(err)
+
+	f := vmcontext.NewFactories(&vmcontext.ValidationConfig{
+		TrackGas:         true,
+		CheckExitCode:    true,
+		CheckReturnValue: true,
+		CheckStateRoot:   true,
+	})
+	stateWrapper, applier := f.NewStateAndApplier()
+	if err := s.RegisterService(NewApplierService(applier), ""); err != nil {
+		log.Fatal(err)
+	}
+	if err := s.RegisterService(NewVmWrapperService(stateWrapper), ""); err != nil {
+		log.Fatal(err)
 	}
 	http.Handle("/rpc", s)
 	if err := http.ListenAndServe("127.0.0.1:8378", nil); err != nil {

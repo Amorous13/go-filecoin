@@ -75,44 +75,51 @@ type ApplyTipSetMessagesReply struct {
 	Root     cid.Cid
 }
 
-func NewApplierService(applier state.Applier) *ApplierService {
+func NewApplierService(applier state.Applier, sw state.VMWrapper) *ApplierService {
 	return &ApplierService{applier: applier}
 }
 
 type ApplierService struct {
 	applier state.Applier
+	sw      state.VMWrapper
 }
 
-func (a *ApplierService) ApplyMessage(r *http.Request, args *ApplyMessageArgs, reply *ApplyMessageReply) error {
+func (a *VmWrapperService) ApplyMessage(r *http.Request, args *ApplyMessageArgs, reply *ApplyMessageReply) error {
 	result, err := a.applier.ApplyMessage(args.Epoch, args.Message)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Receipt = result.Receipt
 	reply.Reward = result.Reward
 	reply.Penalty = result.Penalty
-	// FIXME need to access the state root here
-	reply.Root = cid.Undef
+	reply.Root = a.vm.Root()
 	log.Infow("ApplierService.ApplyMessage", "args", args, "reply", reply)
 	return nil
 }
 
-func (a *ApplierService) ApplySignedMessage(r *http.Request, args *ApplySignedMessageArgs, reply *ApplyMessageReply) error {
+func (a *VmWrapperService) ApplySignedMessage(r *http.Request, args *ApplySignedMessageArgs, reply *ApplyMessageReply) error {
 	log.Infow("ApplierService.ApplySignedMessage", "args", args, "reply", reply)
 	return nil
 }
 
-func (a *ApplierService) ApplyTipSetMessages(r *http.Request, args *ApplyTipSetMessagesArgs, reply *ApplyTipSetMessagesReply) error {
+func (a *VmWrapperService) ApplyTipSetMessages(r *http.Request, args *ApplyTipSetMessagesArgs, reply *ApplyTipSetMessagesReply) error {
 	log.Infow("ApplierService.ApplyTipSetMessages", "args", args, "reply", reply)
 	return nil
 }
 
-func NewVmWrapperService(vm state.VMWrapper) *VmWrapperService {
-	return &VmWrapperService{vm: vm}
+func NewVmWrapperService(f state.Factories) *VmWrapperService {
+	stateWrapper, applier := f.NewStateAndApplier()
+	return &VmWrapperService{
+		factory: f,
+		vm:      stateWrapper,
+		applier: applier,
+	}
 }
 
 type VmWrapperService struct {
-	vm state.VMWrapper
+	factory state.Factories
+	vm      state.VMWrapper
+	applier state.Applier
 }
 
 type RootReply struct {
@@ -136,7 +143,7 @@ type StoreGetReply struct {
 func (v *VmWrapperService) StoreGet(r *http.Request, args *StoreGetArgs, reply *StoreGetReply) error {
 	var out cbg.Deferred
 	if err := v.vm.StoreGet(args.Key, &out); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Out = out.Raw
 	log.Infow("StoreGet", "args", args, "reply", reply)
@@ -154,7 +161,7 @@ type StorePutReply struct {
 func (v *VmWrapperService) StorePut(r *http.Request, args *StorePutArgs, reply *StorePutReply) error {
 	key, err := v.vm.StorePut(runtime.CBORBytes(args.Value))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Key = key
 	log.Infow("StorePut", "args", args, "reply", reply)
@@ -175,7 +182,7 @@ type ActorReply struct {
 func (v *VmWrapperService) Actor(r *http.Request, args *ActorArgs, reply *ActorReply) error {
 	actor, err := v.vm.Actor(args.Addr)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Code = actor.Code()
 	reply.Head = actor.Head()
@@ -194,7 +201,7 @@ type SetActorStateArgs struct {
 func (v *VmWrapperService) SetActorState(r *http.Request, args *SetActorStateArgs, reply *ActorReply) error {
 	actor, err := v.vm.SetActorState(args.Addr, args.Balance, runtime.CBORBytes(args.State))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Code = actor.Code()
 	reply.Head = actor.Head()
@@ -222,7 +229,7 @@ type CreateActorReply struct {
 func (v *VmWrapperService) CreateActor(r *http.Request, args *CreateActorArgs, reply *CreateActorReply) error {
 	actor, addr, err := v.vm.CreateActor(args.Code, args.Addr, args.Balance, runtime.CBORBytes(args.State))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	reply.Addr = addr
 	reply.Code = actor.Code()
@@ -230,6 +237,14 @@ func (v *VmWrapperService) CreateActor(r *http.Request, args *CreateActorArgs, r
 	reply.Balance = actor.Balance()
 	reply.CallSeqNum = actor.CallSeqNum()
 	log.Infow("CreateActor", "args", args, "reply", reply)
+	return nil
+}
+
+func (v *VmWrapperService) New(r *http.Request, args *struct{}, reply *struct{}) error {
+	wrapper, applier := v.factory.NewStateAndApplier()
+	v.vm = wrapper
+	v.applier = applier
+	log.Info("NEWVM")
 	return nil
 }
 
@@ -246,11 +261,7 @@ func main() {
 		CheckReturnValue: true,
 		CheckStateRoot:   true,
 	})
-	stateWrapper, applier := f.NewStateAndApplier()
-	if err := s.RegisterService(NewApplierService(applier), ""); err != nil {
-		log.Fatal(err)
-	}
-	if err := s.RegisterService(NewVmWrapperService(stateWrapper), ""); err != nil {
+	if err := s.RegisterService(NewVmWrapperService(f), ""); err != nil {
 		log.Fatal(err)
 	}
 	http.Handle("/rpc", s)

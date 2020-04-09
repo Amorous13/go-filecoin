@@ -149,6 +149,11 @@ type ValidationVMWrapper struct {
 	vm *VM
 }
 
+func (w *ValidationVMWrapper) New() {
+	// HACK
+	w.vm = NewState().vm
+}
+
 // Root implements ValidationVMWrapper.
 func (w *ValidationVMWrapper) Root() cid.Cid {
 	root, dirty := w.vm.state.Root()

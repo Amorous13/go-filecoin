@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/filecoin-project/chain-validation/chain/types"
+	"github.com/filecoin-project/chain-validation/drivers"
 	"github.com/filecoin-project/chain-validation/state"
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/specs-actors/actors/abi"
@@ -98,11 +99,24 @@ func (a *VmWrapperService) ApplyMessage(r *http.Request, args *ApplyMessageArgs,
 }
 
 func (a *VmWrapperService) ApplySignedMessage(r *http.Request, args *ApplySignedMessageArgs, reply *ApplyMessageReply) error {
+	result, err := a.applier.ApplySignedMessage(args.Epoch, args.SignedMessage)
+	if err != nil {
+		return err
+	}
+	reply.Reward = result.Reward
+	reply.Penalty = result.Penalty
+	reply.Root = a.vm.Root()
 	log.Infow("ApplierService.ApplySignedMessage", "args", args, "reply", reply)
 	return nil
 }
 
 func (a *VmWrapperService) ApplyTipSetMessages(r *http.Request, args *ApplyTipSetMessagesArgs, reply *ApplyTipSetMessagesReply) error {
+	result, err := a.applier.ApplyTipSetMessages(args.Epoch, args.Blocks, drivers.NewRandomnessSource())
+	if err != nil {
+		return err
+	}
+	reply.Receipts = result.Receipts
+	reply.Root = a.vm.Root()
 	log.Infow("ApplierService.ApplyTipSetMessages", "args", args, "reply", reply)
 	return nil
 }
